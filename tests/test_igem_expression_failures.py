@@ -184,6 +184,27 @@ def test_heuristic_western_blot_and_failed_to_express_are_separate_cases():
     assert not failed[0]["host"] or "DH5" not in failed[0]["host"]
 
 
+def test_host_does_not_swallow_the_verb_failed():
+    cases = heuristic_cases(
+        "In conclusion, the protein expression of Bacillus subtilis failed."
+    )
+    assert len(cases) == 1
+    assert cases[0]["host"] == "Bacillus subtilis"
+
+
+def test_protocol_and_plan_sentences_are_not_failure_cases():
+    protocol = (
+        "Centrifuge in a centrifuge of 15,000 g for 5 min, collect the protein "
+        "supernatant, and keep the insoluble cell fragments and the precipitation "
+        "of possible inclusion bodies for analysis or recovery."
+    )
+    plan = "Therefore, we decided to purify the protein from the inclusion body by the urea solution."
+    meta = "For WB800n, we needed to analyze why it failed to express."
+    assert heuristic_cases(protocol) == []
+    assert heuristic_cases(plan) == []
+    assert heuristic_cases(meta) == []
+
+
 def test_expression_failed_allows_words_between_expression_and_failed():
     # Real wiki phrasing: the verb is not glued to the noun.
     cases = heuristic_cases(

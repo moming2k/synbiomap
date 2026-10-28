@@ -200,8 +200,23 @@ _CLONING_GEL = re.compile(
     r"plasmid backbone|restriction)\b",
     re.I,
 )
+# A methods step or a plan ("centrifuge ... possible inclusion bodies",
+# "we would extract them from the inclusion body") is not itself a result.
+# "why it failed" is the team talking about a failure they already stated.
+_METHOD_NOT_RESULT = re.compile(
+    r"\b(?:centrifuge|we would|we will|decided to purify|decided to extract|"
+    r"needed to analyze|why it failed)\b",
+    re.I,
+)
+_RESULT_OBSERVATION = re.compile(
+    r"\b(?:detected|found|observed|present|accumulated|stay(?:ed)?|formed|"
+    r"appeared|showed|suggest|mostly|saturated|unable|insoluble)\b",
+    re.I,
+)
 
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# Split on sentence boundaries, but not on "E. coli" (the letter after the
+# period is lowercase). A new sentence in these wikis starts with a capital.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 
 _BBA = re.compile(r"\bBBa_[A-Za-z0-9]+\b")
 _DNA = re.compile(r"\b[ACGTUacgtu]{40,}\b")
@@ -216,7 +231,9 @@ _HOST_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bE\.?\s*coli\s+SHuffle(?:\s*T7)?", re.I),
     re.compile(r"\bE\.?\s*coli\b", re.I),
     re.compile(r"\bBL21\b"),
-    re.compile(r"\bBacillus\s+subtilis(?:\s+\w+)?", re.I),
+    # The optional strain token must look like a strain (it contains a digit),
+    # so "Bacillus subtilis failed" does not swallow the verb.
+    re.compile(r"\bBacillus\s+subtilis(?:\s+[A-Za-z]*\d[\w().\-]*)?", re.I),
     re.compile(r"\bWB800n\b"),
     re.compile(r"\bS\.?\s*cerevisiae\b", re.I),
     re.compile(r"\bPichia\s+pastoris\b", re.I),
@@ -406,6 +423,25 @@ def _norm_space(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _collapse_repeated_text(text: str) -> str:
+    """Drop a sentence that the wiki pasted twice in the same paragraph.
+
+    Some team pages repeat a results block back to back. Keeping both copies
+    makes the stored snippet look like the extractor stuttered.
+    """
+    parts = _SENTENCE_SPLIT.split(text)
+    kept: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        cleaned = part.strip()
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        kept.append(cleaned)
+    return " ".join(kept) if kept else text
+
+
 def html_to_paragraphs(html_text: str) -> list[str]:
     """Visible text blocks from one wiki page, in reading order.
 
@@ -433,7 +469,7 @@ def html_to_paragraphs(html_text: str) -> list[str]:
         # A <td> or <li> that itself contains a <p> would double-count.
         if el.find(_BLOCK_TAGS):
             continue
-        text = _norm_space(el.get_text(" ", strip=True))
+        text = _collapse_repeated_text(_norm_space(el.get_text(" ", strip=True)))
         if len(text) >= 25:
             paragraphs.append(text)
 
@@ -520,6 +556,17 @@ def _sentence_is_failure(sentence: str) -> bool:
     if not labels:
         return False
 
+    # Bench protocol ("Centrifuge ... possible inclusion bodies") is a method
+    # step, not a report that inclusion bodies were observed.
+    if re.search(r"\b(?:centrifuge|resuspend|pipette|vortex)\b", sentence, re.I):
+        return False
+    # "Why it failed" discusses a failure without reporting a new one.
+    if re.search(r"\b(?:why it failed|needed to analyze)\b", sentence, re.I):
+        return False
+    # Protocol lines mention inclusion bodies only as something to set aside.
+    if _METHOD_NOT_RESULT.search(sentence) and not _RESULT_OBSERVATION.search(sentence):
+        return False
+
     inclusion = "inclusion body" in labels
     if _AVOIDANCE.search(sentence) and inclusion and not _HARD_FAILURE.search(sentence):
         return False
@@ -592,6 +639,13 @@ def extract_conditions(text: str) -> str | None:
             bits.append(f"{match.group(1)} {match.group(2)} IPTG")
         else:
             bits.append(f"{match.group(3)} {match.group(4)} IPTG")
+    # Lab notebooks often write c(IPTG) = 0.5 mM, or "1 m mole IPTG".
+    for match in re.finditer(
+        r"c\(\s*IPTG\s*\)\s*=\s*(\d+(?:\.\d+)?)\s*(mM|µM|uM|μM|nM|M)", text, re.I
+    ):
+        bits.append(f"{match.group(1)} {match.group(2)} IPTG")
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*m\s*mole\s*IPTG", text, re.I):
+        bits.append(f"{match.group(1)} mmol IPTG")
 
     for match in re.finditer(r"(\d+(?:\.\d+)?)\s*°\s*C\b", text):
         bits.append(f"{match.group(1)}°C")
@@ -680,15 +734,29 @@ def _paragraph_reports_failure(paragraph: str) -> bool:
     return any(_sentence_is_failure(sentence) for sentence in _split_sentences(paragraph))
 
 
-def _field_from_paragraph(extract, paragraph: str, previous: str):
-    """Read a field from this paragraph.
+def _text_before(paragraph: str, sentence: str) -> str:
+    """Protocol text that comes before the result sentence, not after it.
 
-    The previous paragraph is used only when this one does not say, and only
-    when that previous paragraph is not itself a different failure. Otherwise
-    a Western blot in the paragraph above would lend its strain to the next,
-    unrelated part.
+    Teams often write the IPTG concentration and then the result. Text after
+    the result is frequently the fix ("one combination then worked"), and
+    borrowing those numbers would describe the success, not the failure.
     """
-    found = extract(paragraph)
+    probe = sentence[:80]
+    idx = paragraph.find(probe)
+    if idx <= 0:
+        return ""
+    return paragraph[:idx]
+
+
+def _field_from_paragraph(extract, paragraph: str, sentence: str, previous: str):
+    """Read a field from the result sentence and the lead-in before it.
+
+    The previous paragraph is used only when those do not say, and only when
+    that previous paragraph is not itself a different failure. Otherwise a
+    Western blot above would lend its strain to the next, unrelated part.
+    """
+    blob = (_text_before(paragraph, sentence) + " " + sentence).strip()
+    found = extract(blob)
     if found:
         return found
     if previous and not _paragraph_reports_failure(previous):
@@ -721,9 +789,9 @@ def heuristic_cases(passage: str) -> list[dict]:
             if len(snippet) > 1200:
                 snippet = snippet[:1200].rstrip() + "…"
             cases.append({
-                "sequence": _field_from_paragraph(extract_sequence, paragraph, previous),
-                "host": _field_from_paragraph(extract_host, paragraph, previous),
-                "conditions": _field_from_paragraph(extract_conditions, paragraph, previous),
+                "sequence": _field_from_paragraph(extract_sequence, paragraph, sentence, previous),
+                "host": _field_from_paragraph(extract_host, paragraph, sentence, previous),
+                "conditions": _field_from_paragraph(extract_conditions, paragraph, sentence, previous),
                 "result": result,
                 "failure_reason": failure_reason_for(sentence),
                 "source_snippet": snippet,
@@ -1082,6 +1150,7 @@ def crawl_team_pages(
         if not html:
             continue
         pages.append((url, html))
+        logger.info("page %s/%s %s", len(pages), max_pages, url)
         soup = BeautifulSoup(html, "html.parser")
         for anchor in soup.find_all("a", href=True):
             nxt = _canonical(urljoin(url, anchor["href"]))
