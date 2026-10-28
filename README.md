@@ -55,7 +55,8 @@ cp .env.example .env          # then fill in your API keys
 ├── config/settings.yaml       # all pipeline parameters
 ├── src/                        # reusable modules (imported by scripts/)
 │   ├── ingest/                 # openalex.py, odp.py, patentsview.py, igem.py,
-│   │                           #   igem_wiki.py, normalize.py
+│   │                           #   igem_wiki.py, igem_expression_failures.py,
+│   │                           #   normalize.py
 │   ├── embed/embeddings.py     # SPECTER2 embedding + batch caching
 │   ├── cluster/cluster.py      # UMAP + HDBSCAN
 │   ├── geo/geocode.py          # Nominatim / OpenCage geocoding (cached)
@@ -85,6 +86,23 @@ cp .env.example .env          # then fill in your API keys
 | [OpenAlex](https://openalex.org)                                                          | Academic papers                     | Free REST API; optional key for higher rate limits |
 | [USPTO Open Data Portal](https://data.uspto.gov) / [PatentsView](https://patentsview.org) | Patents                             | Free API (key required)                            |
 | [iGEM Registry](https://igem.org)                                                         | Student projects and BioBrick parts | REST API + CSV export                              |
+
+## Protein expression failures on iGEM wikis
+
+`scripts/03e_scrape_expression_failures.py` reads iGEM team wikis and writes one JSONL row per protein-expression failure (inclusion bodies, a failed expression, a missing band on a protein gel, a negative Western blot). The crawl reuses the team-wiki rules in `src/ingest/igem_wiki.py`: same two URL eras (MediaWiki through 2021, `igem.wiki` from 2022), same “stay inside this team” boundary, and the same research User-Agent. Lab notebooks stay in scope here, because that is where teams write up failed inductions. Pages are cached under `data/raw/igem_expression_failures/` (gitignored) and the crawler never exceeds **1 request per second**.
+
+Without an API key, a deterministic heuristic fills the fields. With a key, the same passages go to any OpenAI-compatible chat endpoint (`IGEM_LLM_API_KEY`, `IGEM_LLM_BASE_URL`, `IGEM_LLM_MODEL`; `OPENAI_*` names work as aliases). `--heuristic-only` forces the heuristic so a sample file does not depend on a model.
+
+```bash
+python scripts/03e_scrape_expression_failures.py \
+    --year 2017 2021 \
+    --team CCU_Taiwan --team Stockholm \
+    --max-pages 8 \
+    --heuristic-only \
+    --out samples/expression_failures_sample.jsonl
+```
+
+`--year` / `--year-start` / `--year-end` choose seasons, `--team` is a case-insensitive substring (repeat it for several teams), `--max-pages` caps pages per team, and `--out` is the JSONL path. A small live sample is committed at `samples/expression_failures_sample.jsonl`. Each row has `team_name`, `year`, `url`, `sequence`, `host`, `conditions`, `result`, `failure_reason`, `source_snippet`, and `extraction_method` (`llm` or `heuristic`).
 
 ## Corpus construction strategy
 
