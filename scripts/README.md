@@ -22,6 +22,7 @@ were numbered independently. The stages below are the real order.
 | `03b_fetch_parts.py` | Fetch iGEM parts from the Registry and match them to projects. |
 | `03c_fetch_team_rosters.py` | Add team-member names to `projects.csv`. |
 | `03d_scrape_wiki_dois.py` | Scrape each iGEM team wiki for the DOIs it cites. |
+| `03e_scrape_expression_failures.py` | Scrape iGEM wikis for protein-expression failures (JSONL). |
 
 ## Stage 2 — Base embed / cluster / visualize
 | Script | Does |

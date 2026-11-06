@@ -7,6 +7,7 @@ statsmodels>=0.14
 # HTTP and API clients
 requests>=2.31
 httpx>=0.25
+beautifulsoup4>=4.12
 
 # Claude API (topic-cluster labelling, scripts/12_label_clusters.py)
 anthropic>=0.116
@@ -47,3 +48,6 @@ tqdm>=4.66
 
 # Optional: speed up OpenAlex paging
 pyalex>=0.13
+
+# Tests for the iGEM expression-failure scraper (no network)
+pytest>=7.0
